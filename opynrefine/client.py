@@ -358,6 +358,16 @@ def _parse_kv_json(value: Optional[str]) -> Optional[Dict[str, Any]]:
         raise SystemExit(f"Invalid JSON payload provided: {exc}") from exc
 
 
+def _load_json_file(path: str) -> Any:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except FileNotFoundError as exc:  # pragma: no cover - CLI path
+        raise SystemExit(f"Operations file not found: {path}") from exc
+    except json.JSONDecodeError as exc:  # pragma: no cover
+        raise SystemExit(f"Invalid JSON in {path}: {exc}") from exc
+
+
 def build_cli_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Minimal CLI for the OpenRefine API client")
     parser.add_argument("--base-url", default="http://127.0.0.1:3333", help="OpenRefine server base URL")
@@ -393,6 +403,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
     create_parser.add_argument("--format-hint", help="Optional MIME hint like text/line-based/*sv")
     create_parser.add_argument("--options", help="JSON string of format-specific options")
     create_parser.set_defaults(func=_cli_create_project)
+
+    apply_parser = subparsers.add_parser("apply-operations", help="Apply a JSON operations file to a project")
+    apply_parser.add_argument("project_id", help="Target project id")
+    apply_parser.add_argument("operations_file", help="Path to the operations JSON file")
+    apply_parser.set_defaults(func=_cli_apply_operations)
 
     return parser
 
@@ -434,6 +449,13 @@ def _cli_create_project(client: OpenRefineClient, args: argparse.Namespace) -> N
         format_hint=args.format_hint,
         format_options=options,
     )
+    json.dump(result, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+
+
+def _cli_apply_operations(client: OpenRefineClient, args: argparse.Namespace) -> None:
+    operations = _load_json_file(args.operations_file)
+    result = client.apply_operations(args.project_id, operations)
     json.dump(result, sys.stdout, indent=2)
     sys.stdout.write("\n")
 

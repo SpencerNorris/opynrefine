@@ -16,6 +16,7 @@ pip install -e .[test]
 opynrefine --base-url http://127.0.0.1:3333 list-projects
 opynrefine call core/get-models --params '{"project":"123"}'
 opynrefine create-project "New dataset" data.csv --format-hint text/line-based/*sv --options '{"separator":","}'
+opynrefine apply-operations 123 operations.json
 ```
 
 ## Tests
