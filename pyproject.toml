@@ -9,7 +9,7 @@ description = "Python client and CLI for the OpenRefine API"
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [
-  { name = "Good Jobs First" }
+  { name = "Spencer Norris" }
 ]
 dependencies = [
   "requests>=2.31",
@@ -21,7 +21,7 @@ test = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/GoodJobsFirst/opynrefine"
+Homepage = "https://github.com/SpencerNorris/opynrefine"
 
 [project.scripts]
 opynrefine = "opynrefine.client:main"
