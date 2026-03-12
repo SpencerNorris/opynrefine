@@ -11,7 +11,6 @@ import os
 import signal
 import sys
 import threading
-from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -31,24 +30,6 @@ def configure_logging(level: int = logging.INFO) -> None:
     LOGGER.setLevel(level)
 
 
-@dataclass
-class OpenRefineResponse:
-    """Simple wrapper that exposes the low-level :class:`requests.Response`."""
-
-    response: requests.Response
-
-    def json(self) -> Any:
-        return self.response.json()
-
-    @property
-    def text(self) -> str:
-        return self.response.text
-
-    @property
-    def content(self) -> bytes:
-        return self.response.content
-
-
 class CommandProxy:
     """Fluent builder for OpenRefine command paths."""
 
@@ -65,19 +46,17 @@ class CommandProxy:
         self,
         *,
         method: str = "GET",
-        expect_json: bool = True,
         params: Optional[Dict[str, Any]] = None,
         data: Optional[Any] = None,
         json_body: Optional[Any] = None,
         files: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
         timeout: Optional[int] = None,
-    ) -> Any:
+    ) -> requests.Response:
         path = "/".join(self._parts)
         return self._client._request(
             path,
             method=method,
-            expect_json=expect_json,
             params=params,
             data=data,
             json_body=json_body,
@@ -135,35 +114,73 @@ class OpenRefineClient:
     # Public helper methods -------------------------------------------------
     def list_projects(self) -> Dict[str, Any]:
         """Return metadata for all projects."""
-        return self.command.core.get_all_project_metadata()
+        response = self.command.core.get_all_project_metadata()
+        response.raise_for_status()
+        return response.json()
 
     def delete_project(self, project_id: str) -> Dict[str, Any]:
-        return self.command.core.delete_project(params={"project": project_id})
+        response = self.command.core.delete_project(method="POST", data={"project": project_id})
+        response.raise_for_status()
+        return response.json()
 
     def get_models(self, project_id: str) -> Dict[str, Any]:
-        return self.command.core.get_models(params={"project": project_id})
+        response = self.command.core.get_models(params={"project": project_id})
+        response.raise_for_status()
+        return response.json()
 
     def get_rows(self, project_id: str, **options: Any) -> Dict[str, Any]:
         params = {"project": project_id, **options}
-        return self.command.core.get_rows(params=params)
+        response = self.command.core.get_rows(params=params)
+        response.raise_for_status()
+        return response.json()
 
-    def export_rows(self, project_id: str, export_format: str = "tsv", **options: Any) -> str:
-        params = {"project": project_id, "format": export_format, **options}
-        return self.command.core.export_rows(params=params, expect_json=False).text
+    def export_rows(self, project_id: str, export_format: str = "tsv", **options: Any) -> requests.Response:
+        """
+        Export rows from a project.
+        Returns the raw requests.Response object to allow streaming output.
+
+        Raises:
+            requests.HTTPError: if the server returns a 4xx/5xx status.
+            RuntimeError: if OpenRefine returns an HTML error page with a 2xx status,
+                which can happen when the project ID is invalid or the project is corrupt.
+        """
+        data = {"project": project_id, "format": export_format, **options}
+        if "engine" not in data:
+            data["engine"] = '{"facets": [], "mode": "row-based"}'
+        response = self.command.core.export_rows(method="POST", data=data)
+        response.raise_for_status()
+        # OpenRefine has a known bug where it can return HTTP 200 with a text/html
+        # error page body (e.g. "Failed to find project id … - may be corrupt")
+        # instead of the expected data. Detect and raise rather than silently
+        # passing the HTML to the caller as if it were valid export data.
+        content_type = response.headers.get("Content-Type", "")
+        if "text/html" in content_type:
+            snippet = response.text[:500].strip()
+            raise RuntimeError(
+                f"OpenRefine returned an HTML error page instead of export data "
+                f"for project {project_id!r}. "
+                f"The project may be corrupt or the ID may be invalid. "
+                f"Response snippet: {snippet!r}"
+            )
+        return response
 
     def apply_operations(self, project_id: str, operations: Any) -> Dict[str, Any]:
         payload = json.dumps(operations)
-        return self.command.core.apply_operations(
+        response = self.command.core.apply_operations(
             method="POST",
             data={"project": project_id, "operations": payload},
         )
+        response.raise_for_status()
+        return response.json()
 
     def compute_facets(self, project_id: str, facets: Any) -> Dict[str, Any]:
         payload = json.dumps(facets)
-        return self.command.core.compute_facets(
+        response = self.command.core.compute_facets(
             method="POST",
             data={"project": project_id, "engine": payload},
         )
+        response.raise_for_status()
+        return response.json()
 
     def create_project_from_url(self, project_name: str, data_url: str, format_options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         data = {
@@ -172,7 +189,9 @@ class OpenRefineClient:
             "options": json.dumps(format_options or {}),
             "url": data_url,
         }
-        return self.command.core.create_project_from_url(method="POST", data=data)
+        response = self.command.core.create_project_from_url(method="POST", data=data)
+        response.raise_for_status()
+        return response.json()
 
     def create_project_from_upload(
         self,
@@ -195,12 +214,12 @@ class OpenRefineClient:
                 method="POST",
                 data=data,
                 files=files,
-                expect_json=False,
             )
-        project_id = self._extract_project_id(response.response.url)
+        response.raise_for_status()
+        project_id = self._extract_project_id(response.url)
         return {
             "project_id": project_id,
-            "project_url": response.response.url,
+            "project_url": response.url,
             "html": response.text,
         }
 
@@ -209,11 +228,10 @@ class OpenRefineClient:
         command_path: str,
         *,
         method: str = "GET",
-        expect_json: bool = True,
         **kwargs: Any,
-    ) -> Any:
-        """Execute an arbitrary command path."""
-        return self._request(command_path, method=method, expect_json=expect_json, **kwargs)
+    ) -> requests.Response:
+        """Execute an arbitrary command path and return the raw Response object."""
+        return self._request(command_path, method=method, **kwargs)
 
     # Internal helpers ------------------------------------------------------
     def _handle_signal(self, signum: int, frame: Any) -> None:
@@ -246,14 +264,13 @@ class OpenRefineClient:
         command: str,
         *,
         method: str = "GET",
-        expect_json: bool = True,
         params: Optional[Dict[str, Any]] = None,
         data: Optional[Any] = None,
         json_body: Optional[Any] = None,
         files: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
         timeout: Optional[int] = None,
-    ) -> Any:
+    ) -> requests.Response:
         self._ensure_not_interrupted()
         url = self._build_url(command)
         self.logger.debug("%s %s params=%s", method.upper(), url, params)
@@ -272,14 +289,7 @@ class OpenRefineClient:
             timeout=timeout or self.timeout,
         )
         self.logger.info("%s %s -> %s", method.upper(), url, response.status_code)
-        response.raise_for_status()
-        if expect_json:
-            try:
-                return response.json()
-            except ValueError:
-                self.logger.debug("Response did not contain JSON, returning raw text")
-                return response.text
-        return OpenRefineResponse(response)
+        return response
 
     @staticmethod
     def _extract_project_id(url: str) -> Optional[str]:
@@ -388,14 +398,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     call_parser.add_argument("--method", default="GET", help="HTTP method to use")
     call_parser.add_argument("--params", help="JSON object of query params")
     call_parser.add_argument("--data", help="JSON object of form data to send")
-    call_parser.add_argument("--expect-json", action="store_true", help="Expect JSON in response (default true)")
-    call_parser.add_argument(
-        "--no-expect-json",
-        dest="expect_json",
-        action="store_false",
-        help="Return raw response wrapper",
-    )
-    call_parser.set_defaults(expect_json=True, func=_cli_call)
+    call_parser.set_defaults(func=_cli_call)
 
     create_parser = subparsers.add_parser("create-project", help="Create a new project from a file upload")
     create_parser.add_argument("project_name", help="Name for the new project")
@@ -427,18 +430,19 @@ def _cli_delete_project(client: OpenRefineClient, args: argparse.Namespace) -> N
 def _cli_call(client: OpenRefineClient, args: argparse.Namespace) -> None:
     params = _parse_kv_json(args.params)
     data = _parse_kv_json(args.data)
-    result = client.execute_command(
+    response = client.execute_command(
         args.command_path,
         method=args.method,
         params=params,
         data=data,
-        expect_json=args.expect_json,
     )
-    if isinstance(result, OpenRefineResponse):
-        sys.stdout.write(result.text)
-    else:
-        json.dump(result, sys.stdout, indent=2)
-        sys.stdout.write("\n")
+    # Behave like curl/httpie: output headers/body depending on flags?
+    # For now, just simplistic behavior: try JSON, else text
+    try:
+        json.dump(response.json(), sys.stdout, indent=2)
+    except ValueError:
+        sys.stdout.write(response.text)
+    sys.stdout.write("\n")
 
 
 def _cli_create_project(client: OpenRefineClient, args: argparse.Namespace) -> None:
@@ -467,6 +471,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     client = OpenRefineClient(base_url=args.base_url, timeout=args.timeout)
     try:
         args.func(client, args)
+    except requests.HTTPError as exc:
+        sys.stderr.write(f"HTTP Error: {exc}\n")
+        return 1
     finally:
         client.close()
     return 0
